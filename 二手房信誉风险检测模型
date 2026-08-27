@@ -1,0 +1,1418 @@
+# ============================================================
+# 项目名称：二手房抵押贷款反欺诈检测系统
+# 版权声明：Copyright (c) 2026 [henter1232]
+# 许可证：本项目遵循 GNU 通用公共许可证 v3.0
+# 声明：仅供学习交流使用，严禁用于任何商业用途。如需商用，请联系作者。
+# ============================================================
+# 第一部分：导入库
+# ============================================================
+# pandas：数据分析核心库，用于读取CSV文件、处理数据表格
+import pandas as pd
+
+# numpy：数值计算库，用于生成随机数、数组运算
+import numpy as np
+
+# os：操作系统接口，用于检查文件是否存在、创建目录、拼接文件路径
+import os
+
+# logging：日志记录库，用于输出带时间戳的日志信息，比print更专业
+import logging
+
+# typing：类型提示，用于标注函数参数和返回值的类型，提高代码可读性
+from typing import Dict
+
+# datetime：日期时间库，用于获取当前时间、格式化日期
+from datetime import datetime
+
+# warnings：警告控制库
+import warnings
+
+from typing import Dict, Any
+
+# 忽略pandas等库的警告信息，保持控制台输出干净
+warnings.filterwarnings("ignore")
+
+# ============================================================
+# 第二部分：配置日志系统
+# ============================================================
+
+# 配置日志系统的基本设置
+logging.basicConfig(
+    # level：日志级别，只显示INFO及以上的日志（INFO、WARNING、ERROR）
+    level=logging.INFO,
+
+    # format：日志格式，显示时间、级别、消息内容
+    format="%(asctime)s - %(levelname)s - %(message)s",
+
+    # handlers：日志输出位置
+    handlers=[
+        # StreamHandler：输出到控制台（终端）
+        logging.StreamHandler()
+    ]
+)
+
+# 创建logger对象，__name__是当前模块名
+# 之后可以用 logger.info("消息") 来输出日志
+logger = logging.getLogger(__name__)
+
+
+# ============================================================
+# 第三部分：DataReader 类 - 负责读取数据
+# ============================================================
+
+class DataReader:
+    """
+    数据读取器类：负责从CSV文件读取数据或生成模拟数据
+
+    这个类的作用是：
+    1. 从CSV文件读取5张表（贷款账单、贷款账户、客户信息、合作伙伴、项目）
+    2. 生成模拟数据用于测试（不需要真实CSV文件）
+    3. 显示数据摘要和预览
+    4. 保存数据到CSV文件
+    """
+
+    def __init__(self, data_dir: str = './data'):
+        """
+        初始化数据读取器
+
+        参数：
+            data_dir: 数据文件存放的目录，默认是当前目录下的data文件夹
+
+        这个方法是类的构造函数，创建DataReader对象时自动执行
+        """
+        # self.data_dir：保存数据目录路径到实例变量，供其他方法使用
+        self.data_dir = data_dir
+
+        # self.raw_data：空字典，用来存储读取的所有数据表
+        # 键是表名（如'loan_bill'），值是对应的DataFrame
+        self.raw_data = {}
+
+        # self.file_status：空字典，用来记录每个文件的读取状态（成功/失败）
+        self.file_status = {}
+
+        # os.makedirs：如果目录不存在则创建
+        # exist_ok=True表示如果目录已存在则不报错
+        os.makedirs(data_dir, exist_ok=True)
+
+        # 输出日志信息，告诉用户数据目录在哪里
+        logger.info(f"📁 数据目录: {data_dir}")
+
+    def read_from_csv(self,
+                      loan_bill_file: str = 'loan_bill.csv',
+                      loan_account_file: str = 'loan_account.csv',
+                      customer_file: str = 'customer_prof.csv',
+                      partner_file: str = 'partner_org.csv',
+                      project_file: str = 'project.csv') -> Dict[str, pd.DataFrame]:
+        """
+        从CSV文件读取所有数据表
+
+        参数：
+            loan_bill_file: 贷款账单表的文件名，默认'loan_bill.csv'
+            loan_account_file: 贷款账户表的文件名，默认'loan_account.csv'
+            customer_file: 客户信息表的文件名，默认'customer_prof.csv'
+            partner_file: 合作伙伴表的文件名，默认'partner_org.csv'
+            project_file: 项目表的文件名，默认'project.csv'
+
+        返回值：
+            一个字典，键是表名，值是对应的DataFrame
+
+        这个方法会尝试多种编码格式（utf-8、gbk等）读取CSV文件
+        因为不同系统导出的CSV编码可能不同
+        """
+        # -------- 创建映射字典 --------
+        # 把表名和文件名对应起来，方便循环处理每一张表
+        # 键是表名（内部使用），值是文件名（实际文件）
+        file_mapping = {
+            'loan_bill': loan_bill_file,  # 贷款账单表
+            'loan_account': loan_account_file,  # 贷款账户表
+            'customer_prof': customer_file,  # 客户信息表
+            'partner_org': partner_file,  # 合作伙伴表
+            'project': project_file  # 项目表
+        }
+
+        # -------- 循环读取每张表 --------
+        # .items() 遍历字典，table_name是表名，file_name是文件名
+        for table_name, file_name in file_mapping.items():
+            # os.path.join：拼接完整路径，如 './data/loan_bill.csv'
+            file_path = os.path.join(self.data_dir, file_name)
+
+            # -------- 尝试多种编码格式 --------
+            # 不同系统导出的CSV编码可能不同，逐个尝试
+            for encoding in ['utf-8', 'gbk', 'gb2312', 'utf-8-sig']:
+                try:
+                    # pd.read_csv：用pandas读取CSV文件为DataFrame
+                    df = pd.read_csv(file_path, encoding=encoding)
+
+                    # 将读取的DataFrame存入raw_data字典
+                    self.raw_data[table_name] = df
+
+                    # 记录读取状态为成功
+                    self.file_status[table_name] = 'success'
+
+                    # 输出日志：显示表名、行数、列数
+                    logger.info(f"✅ {table_name}: {len(df)} 行, {len(df.columns)} 列")
+
+                    # break：读取成功就跳出循环，不再尝试其他编码
+                    break
+
+                except UnicodeDecodeError:
+                    # 如果编码不对，继续尝试下一种编码
+                    continue
+
+                except FileNotFoundError:
+                    # 如果文件不存在，输出警告并跳出循环
+                    logger.warning(f"⚠️ 文件不存在: {file_path}")
+                    break
+
+        # 返回所有读取的数据
+        return self.raw_data
+
+    def generate_sample_data(self, n: int = 500, seed: int = 42) -> Dict[str, pd.DataFrame]:
+        """
+        生成模拟数据（用于测试，不需要真实CSV文件）
+
+        参数：
+            n: 生成的贷款记录数量，默认500条
+            seed: 随机种子，保证每次运行生成的随机数相同，便于调试
+
+        返回值：
+            一个字典，包含5张模拟数据表
+
+        这个方法会生成5张表：
+        1. loan_bill：贷款账单表
+        2. loan_account：贷款账户表
+        3. customer_prof：客户信息表
+        4. partner_org：合作伙伴表
+        5. project：项目表
+
+        注意：前100条数据使用前5个收款账号，制造"可疑"场景
+        这样检测时能发现有价值的可疑账户
+        """
+        # np.random.seed：设置随机种子，保证每次运行结果一致
+        np.random.seed(seed)
+
+        # -------- 生成基础ID --------
+        # 列表推导式：生成客户ID列表
+        # f'CUST_{i:04d}' 当 i=1 时生成 'CUST_0001'
+        # 结果：['CUST_0001', 'CUST_0002', ..., 'CUST_0500']
+        customers = [f'CUST_{i:04d}' for i in range(1, n + 1)]
+
+        # 生成合同ID列表：CON_0001, CON_0002, ..., CON_0500
+        contracts = [f'CON_{i:04d}' for i in range(1, n + 1)]
+
+        # 生成20个收款账号：PAY_001, PAY_002, ..., PAY_020
+        payee_accounts = [f'PAY_{i:03d}' for i in range(1, 21)]
+
+        # -------- 分配收款账号（制造可疑场景） --------
+        # payee_mapping：存储每条记录对应的收款账号
+        payee_mapping = []
+
+        # 循环n次，为每条贷款分配收款账号
+        for i in range(n):
+            if i < 100:
+                # 前100条数据使用前5个账号（循环使用）
+                # 这制造了"多个借款人资金流向同一个账户"的可疑场景
+                # i=0→PAY_001, i=1→PAY_002, ..., i=4→PAY_005, i=5→PAY_001
+                payee_mapping.append(payee_accounts[i % 5])
+            else:
+                # 其余数据从PAY_006到PAY_020中随机选择
+                # 这些是正常数据，每个账户只有少量借款人
+                payee_mapping.append(np.random.choice(payee_accounts[5:]))
+
+        # -------- 创建贷款账单表 (loan_bill) --------
+        # pd.DataFrame：创建DataFrame，每列是一个Series
+        self.raw_data['loan_bill'] = pd.DataFrame({
+            # contract_id：合同ID列，每个合同唯一
+            'contract_id': contracts,
+
+            # customer_id：客户ID列，标识借款人
+            'customer_id': customers,
+
+            # product_code：产品代码，所有行都是二手房抵押贷款
+            'product_code': ['MORTGAGE_SECOND_HAND'] * n,
+
+            # snapshot_date：数据快照日期，所有行都是同一天
+            'snapshot_date': ['2025-07-28'] * n,
+
+            # lending_date：放款日期，从2024-01-01开始每天一条
+            # pd.date_range：生成日期序列，freq='D'表示每天
+            # strftime：格式化日期为字符串
+            'lending_date': pd.date_range('2024-01-01', periods=n, freq='D').strftime('%Y-%m-%d'),
+
+            # maturity_date：到期日期，从2044-01-01开始每天一条
+            'maturity_date': pd.date_range('2044-01-01', periods=n, freq='D').strftime('%Y-%m-%d'),
+
+            # balance：贷款余额，50万到500万之间的随机数
+            # np.random.uniform：生成均匀分布的随机数
+            # .round(2)：保留2位小数
+            'balance': np.random.uniform(500000, 5000000, n).round(2),
+
+            # branch_id：支行ID，从5个中随机选择
+            'branch_id': np.random.choice(['BR001', 'BR002', 'BR003', 'BR004', 'BR005'], n),
+
+            # loan_sequence：贷款序号，1到9之间的随机整数
+            'loan_sequence': np.random.randint(1, 10, n)
+        })
+
+        # 输出日志：显示生成的记录数
+        logger.info(f"✅ 贷款账单: {len(self.raw_data['loan_bill'])} 条")
+
+        # -------- 创建贷款账户表 (loan_account) --------
+        # 先准备收款人姓名字典（账号→姓名）
+        payee_names_dict = {
+            'PAY_001': '陈七', 'PAY_002': '李四', 'PAY_003': '王五',
+            'PAY_004': '赵六', 'PAY_005': '钱八', 'PAY_006': '孙九',
+            'PAY_007': '周十', 'PAY_008': '吴十一', 'PAY_009': '郑十二',
+            'PAY_010': '冯十三', 'PAY_011': '陈十四', 'PAY_012': '褚十五',
+            'PAY_013': '卫十六', 'PAY_014': '蒋十七', 'PAY_015': '沈十八',
+            'PAY_016': '韩十九', 'PAY_017': '杨二十', 'PAY_018': '朱二一',
+            'PAY_019': '秦二二', 'PAY_020': '尤二三'
+        }
+
+        # 准备列表，用于存储每条记录的收款账号和姓名
+        payee_accounts_list = []
+        payee_names_list = []
+
+        # 循环n次，为每条记录生成收款账号和姓名
+        for i in range(n):
+            # np.random.random()：生成0到1之间的随机数
+            if np.random.random() < 0.05:
+                # 5%的概率制造空值（None），模拟真实数据中的缺失
+                payee_accounts_list.append(None)
+                payee_names_list.append(None)
+            elif np.random.random() < 0.03:
+                # 3%的概率制造空字符串，模拟数据格式问题
+                payee_accounts_list.append('')
+                payee_names_list.append('')
+            else:
+                # 正常数据：使用之前分配的收款账号
+                payee_acc = payee_mapping[i]
+                payee_accounts_list.append(payee_acc)
+                # .get()：从字典中获取姓名，如果不存在则使用默认值
+                payee_names_list.append(payee_names_dict.get(payee_acc, f'收款人_{payee_acc}'))
+
+        # 创建贷款账户表
+        self.raw_data['loan_account'] = pd.DataFrame({
+            # contract_id：合同ID，用于和贷款账单表关联
+            'contract_id': contracts,
+
+            # snapshot_date：数据快照日期
+            'snapshot_date': ['2025-07-28'] * n,
+
+            # total_balance：总余额，10万到500万之间的随机数
+            'total_balance': np.random.uniform(100000, 5000000, n).round(2),
+
+            # payee_account：收款账号（可能有空值）
+            'payee_account': payee_accounts_list,
+
+            # payee_account_name：收款人姓名（可能有空值）
+            'payee_account_name': payee_names_list,
+
+            # loan_classification：贷款五级分类
+            # np.random.choice：按指定概率从列表中随机选择
+            'loan_classification': np.random.choice(
+                ['正常', '关注', '次级', '可疑', '损失'],  # 分类选项
+                n,  # 生成n个
+                p=[0.65, 0.15, 0.08, 0.07, 0.05]  # 各分类的概率权重
+            ),
+
+            # partner_org_id：合作机构ID，可能为空
+            'partner_org_id': np.random.choice([None, 'P001', 'P002', 'P003'], n),
+
+            # project_id：项目ID，可能为空
+            'project_id': np.random.choice([None, 'PRJ001', 'PRJ002', 'PRJ003'], n)
+        })
+        logger.info(f"✅ 贷款账户: {len(self.raw_data['loan_account'])} 条")
+
+        # -------- 创建客户信息表 (customer_prof) --------
+        self.raw_data['customer_prof'] = pd.DataFrame({
+            # customer_id：客户ID，和贷款账单表关联
+            'customer_id': customers,
+            # full_name：客户全名
+            'full_name': [f'借款人_{i:04d}' for i in range(1, n + 1)],
+            # id_number：身份证号
+            'id_number': [f'ID_{i:04d}' for i in range(1, n + 1)],
+            # phone：手机号
+            'phone': [f'138{i:04d}8888' for i in range(1, n + 1)]
+        })
+        logger.info(f"✅ 客户信息: {len(self.raw_data['customer_prof'])} 条")
+
+        # -------- 创建合作伙伴表 (partner_org) --------
+        self.raw_data['partner_org'] = pd.DataFrame({
+            'partner_org_id': ['P001', 'P002', 'P003'],  # 合作机构ID
+            'corporate_name': ['房产中介A', '房产中介B', '房产中介C']  # 机构名称
+        })
+        logger.info(f"✅ 合作伙伴: {len(self.raw_data['partner_org'])} 条")
+
+        # -------- 创建项目表 (project) --------
+        self.raw_data['project'] = pd.DataFrame({
+            'project_id': ['PRJ001', 'PRJ002', 'PRJ003'],  # 项目ID
+            'project_code': ['PROJ_A', 'PROJ_B', 'PROJ_C'],  # 项目代码
+            'project_name': ['按揭项目A', '按揭项目B', '按揭项目C']  # 项目名称
+        })
+        logger.info(f"✅ 项目信息: {len(self.raw_data['project'])} 条")
+
+        # 返回所有生成的数据
+        return self.raw_data
+
+    def show_summary(self):
+        """
+        显示所有数据表的加载摘要
+
+        在控制台打印每张表的行数和列数
+        """
+        # 打印标题和分隔线
+        print("\n" + "=" * 80)
+        print("📋 数据加载摘要")
+        print("=" * 80)
+
+        # 遍历raw_data字典中的所有表
+        # .items() 返回键值对
+        for table_name, df in self.raw_data.items():
+            if not df.empty:
+                # 如果DataFrame不为空，显示行数和列数
+                print(f"  ✅ {table_name}: {len(df)} 行, {len(df.columns)} 列")
+            else:
+                # 如果DataFrame为空，显示空数据
+                print(f"  ❌ {table_name}: 空数据")
+
+        print("=" * 80)
+
+    def preview(self, table_name: str, n: int = 5):
+        """
+        预览指定数据表的前几行
+
+        参数：
+            table_name: 要预览的表名
+            n: 显示的行数，默认5行
+        """
+        # 检查表是否存在且不为空
+        if table_name in self.raw_data and not self.raw_data[table_name].empty:
+            # 打印标题
+            print(f"\n📊 {table_name} 预览 (前{n}行):")
+            print("=" * 80)
+            # .head(n)：取前n行
+            # .to_string()：以字符串格式打印，显示更完整
+            print(self.raw_data[table_name].head(n).to_string())
+        else:
+            # 如果表不存在或为空，打印警告
+            print(f"⚠️ 表 '{table_name}' 不存在或为空")
+
+    def save_to_csv(self, data: Dict[str, pd.DataFrame], output_dir: str = './cleaned_data'):
+        """
+        将清洗后的数据保存为CSV文件
+
+        参数：
+            data: 要保存的数据字典
+            output_dir: 输出目录，默认是当前目录下的cleaned_data文件夹
+        """
+        # 如果输出目录不存在则创建
+        os.makedirs(output_dir, exist_ok=True)
+
+        # 遍历数据字典中的每一张表
+        for table_name, df in data.items():
+            if not df.empty:
+                # 拼接文件路径：'./cleaned_data/loan_bill.csv'
+                file_path = os.path.join(output_dir, f'{table_name}.csv')
+                # .to_csv：保存为CSV
+                # index=False：不保存行索引
+                # encoding='utf-8-sig'：使用UTF-8编码，兼容Excel
+                df.to_csv(file_path, index=False, encoding='utf-8-sig')
+                logger.info(f"✅ 已保存: {file_path}")
+
+        logger.info(f"✅ 数据已保存到 {output_dir}")
+
+
+# ============================================================
+# 第四部分：DataCleaner 类 - 负责清洗数据
+# ============================================================
+
+class DataCleaner:
+    """
+    数据清洗器类：负责清洗数据中的缺失值、重复值、异常值
+
+    清洗步骤：
+    1. 删除重复行
+    2. 清理列名（去除首尾空格）
+    3. 修复日期格式
+    4. 清洗文本列（去除空格、替换空值）
+    5. 修复数值列（负数归零）
+    6. 处理缺失值（填充或删除）
+    7. 特定表校验（贷款账户、贷款账单）
+    """
+
+    def __init__(self):
+        """初始化数据清洗器"""
+        # cleaning_report：存储每张表的清洗报告
+        self.cleaning_report = {}
+        # cleaned_data：存储清洗后的数据
+        self.cleaned_data = {}
+        logger.info("🧹 数据清洗器初始化完成")
+
+    def clean_all(self, raw_data: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
+        """
+        清洗所有数据表
+
+        参数：
+            raw_data: 原始数据字典
+
+        返回值：
+            清洗后的数据字典
+        """
+        # 打印开始日志
+        logger.info("=" * 60)
+        logger.info("开始数据清洗...")
+        logger.info("=" * 60)
+
+        # 遍历原始数据中的每一张表
+        for table_name, df in raw_data.items():
+            # 如果DataFrame为空
+            if df.empty:
+                # 输出警告并跳过
+                logger.warning(f"⚠️ {table_name}: 数据为空，跳过清洗")
+                self.cleaned_data[table_name] = df
+                continue
+
+            # 输出当前清洗的表名
+            logger.info(f"\n📊 清洗 {table_name}:")
+            # 调用单表清洗方法
+            self.cleaned_data[table_name] = self._clean_table(df, table_name)
+
+        logger.info("=" * 60)
+        logger.info("✅ 所有数据清洗完成")
+        return self.cleaned_data
+
+    def _clean_table(self, df: pd.DataFrame, table_name: str) -> pd.DataFrame:
+        """
+        清洗单个数据表（内部方法）
+
+        参数：
+            df: 原始DataFrame
+            table_name: 表名
+
+        返回值：
+            清洗后的DataFrame
+        """
+        # 记录原始行数和列数
+        original_rows = len(df)
+        original_cols = len(df.columns)
+
+        # 创建清洗报告字典
+        report = {
+            'original_rows': original_rows,  # 原始行数
+            'original_cols': original_cols,  # 原始列数
+            'operations': []  # 操作列表，记录执行了哪些清洗操作
+        }
+
+        # 复制一份数据，不修改原始数据
+        # 为什么要复制？因为要保留原始数据，方便对比和恢复
+        cleaned = df.copy()
+
+        # -------- 操作1：删除完全重复的行 --------
+        # .duplicated()：返回布尔Series，True表示重复
+        # .sum()：统计True的数量
+        duplicate_count = cleaned.duplicated().sum()
+        if duplicate_count > 0:
+            # .drop_duplicates()：删除重复行
+            cleaned = cleaned.drop_duplicates()
+            # 记录操作
+            report['operations'].append(f"删除重复行: {duplicate_count} 行")
+
+        # -------- 操作2：清理列名 --------
+        # .str.strip()：去除列名首尾的空格
+        # 例如 ' contract_id ' → 'contract_id'
+        cleaned.columns = cleaned.columns.str.strip()
+
+        # -------- 操作3：修复日期格式 --------
+        cleaned = self._fix_dates(cleaned)
+
+        # -------- 操作4：清洗文本列 --------
+        cleaned = self._clean_text_columns(cleaned)
+
+        # -------- 操作5：修复数值列 --------
+        cleaned = self._fix_numeric_columns(cleaned)
+
+        # -------- 操作6：处理缺失值 --------
+        cleaned = self._handle_missing_values(cleaned)
+
+        # -------- 操作7：特定表校验 --------
+        if table_name == 'loan_account':
+            # 贷款账户表：检查收款人姓名长度
+            cleaned = self._validate_loan_account(cleaned)
+        elif table_name == 'loan_bill':
+            # 贷款账单表：检查余额是否大于0
+            cleaned = self._validate_loan_bill(cleaned)
+
+        # -------- 记录清洗结果 --------
+        report['cleaned_rows'] = len(cleaned)  # 清洗后的行数
+        report['cleaned_cols'] = len(cleaned.columns)  # 清洗后的列数
+        report['removed_rows'] = original_rows - len(cleaned)  # 删除的行数
+        report['removed_cols'] = original_cols - len(cleaned.columns)  # 删除的列数
+
+        # 存入清洗报告
+        self.cleaning_report[table_name] = report
+
+        # 输出清洗日志
+        logger.info(f"  原始: {original_rows} 行 × {original_cols} 列")
+        logger.info(f"  清洗后: {len(cleaned)} 行 × {len(cleaned.columns)} 列")
+
+        return cleaned
+
+    def _fix_dates(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        修复日期格式
+
+        参数：
+            df: 要修复的DataFrame
+
+        返回值：
+            修复后的DataFrame
+        """
+        # 需要修复的日期列名列表
+        date_columns = ['lending_date', 'maturity_date', 'snapshot_date']
+
+        # 遍历每一列
+        for col in date_columns:
+            # 检查列是否存在
+            if col in df.columns:
+                try:
+                    # pd.to_datetime：转换为日期格式
+                    # errors='coerce'：无法转换的设为NaN
+                    df[col] = pd.to_datetime(df[col], errors='coerce')
+                except Exception:
+                    # 如果转换失败，跳过
+                    pass
+
+        return df
+
+    def _clean_text_columns(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        清洗文本列
+
+        步骤：
+        1. 选出所有文本类型的列
+        2. 确保是字符串类型
+        3. 去除首尾空格
+        4. 将空字符串、'nan'、'None'、'null'替换为NaN
+
+        参数：
+            df: 要清洗的DataFrame
+
+        返回值：
+            清洗后的DataFrame
+        """
+        # .select_dtypes(include=['object'])：选出所有文本类型的列
+        # .columns.tolist()：转换为列表
+        text_columns = df.select_dtypes(include=['object']).columns.tolist()
+
+        # 遍历每一列
+        for col in text_columns:
+            # .astype(str)：确保是字符串类型
+            df[col] = df[col].astype(str)
+            # .str.strip()：去除首尾空格
+            df[col] = df[col].str.strip()
+            # .replace()：将空字符串等替换为NaN
+            df[col] = df[col].replace(['', 'nan', 'None', 'null'], np.nan)
+
+        return df
+
+    def _fix_numeric_columns(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        修复数值列
+
+        步骤：
+        1. 转换为数值类型
+        2. 负数转为0（余额不能为负）
+
+        参数：
+            df: 要修复的DataFrame
+
+        返回值：
+            修复后的DataFrame
+        """
+        # 需要修复的数值列名列表
+        numeric_columns = ['balance', 'total_balance']
+
+        # 遍历每一列
+        for col in numeric_columns:
+            # 检查列是否存在
+            if col in df.columns:
+                # pd.to_numeric：转换为数值
+                # errors='coerce'：无法转换的设为NaN
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+                # .clip(lower=0)：将所有值限制在0以上（负数变0）
+                df[col] = df[col].clip(lower=0)
+
+        return df
+
+    def _handle_missing_values(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        处理缺失值
+
+        规则：
+        1. 缺失率超过80%的列：删除该列
+        2. 收款人姓名：填充为'UNKNOWN'
+        3. 余额列：填充为0
+        4. 收款账号：填充为'MISSING_ACCOUNT'
+
+        参数：
+            df: 要处理的DataFrame
+
+        返回值：
+            处理后的DataFrame
+        """
+        # 遍历每一列
+        for col in df.columns:
+            # .isnull().sum()：统计缺失值数量
+            missing_count = df[col].isnull().sum()
+            # 计算缺失率
+            missing_rate = missing_count / len(df) if len(df) > 0 else 0
+
+            if missing_rate > 0.8:
+                # 缺失率超过80%，删除该列
+                df = df.drop(columns=[col])
+            elif col == 'payee_account_name':
+                # 收款人姓名：填充为'UNKNOWN'
+                df[col] = df[col].fillna('UNKNOWN')
+            elif col in ['balance', 'total_balance']:
+                # 余额列：填充为0
+                df[col] = df[col].fillna(0)
+            elif col == 'payee_account':
+                # 收款账号：填充为'MISSING_ACCOUNT'
+                df[col] = df[col].fillna('MISSING_ACCOUNT')
+
+        return df
+
+    def _validate_loan_account(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        校验贷款账户表
+
+        规则：检查收款人姓名长度，过长的标记为企业账户
+        个人姓名通常不超过60字符，超过的可能是企业账户
+
+        参数：
+            df: 贷款账户DataFrame
+
+        返回值：
+            校验后的DataFrame
+        """
+        # 如果收款人姓名列存在
+        if 'payee_account_name' in df.columns:
+            # 计算名称长度
+            df['name_length'] = df['payee_account_name'].astype(str).str.len()
+            # 找出名称长度超过60的
+            long_name_mask = df['name_length'] > 60
+            if long_name_mask.sum() > 0:
+                # 标记为企业账户
+                df.loc[long_name_mask, 'payee_account_name'] = 'ENTERPRISE'
+            # 删除临时计算的长度列
+            df = df.drop(columns=['name_length'])
+
+        return df
+
+    def _validate_loan_bill(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        校验贷款账单表
+
+        规则：检查余额是否大于0，删除余额异常的记录
+
+        参数：
+            df: 贷款账单DataFrame
+
+        返回值：
+            校验后的DataFrame
+        """
+        # 如果余额列存在
+        if 'balance' in df.columns:
+            # 找出余额小于等于0的记录
+            invalid_balance_mask = df['balance'] <= 0
+            if invalid_balance_mask.sum() > 0:
+                # 删除这些记录（~是取反，保留正常记录）
+                df = df[~invalid_balance_mask]
+
+        return df
+
+    def show_cleaning_report(self):
+        """显示清洗报告"""
+        print("\n" + "=" * 80)
+        print("📊 数据清洗报告")
+        print("=" * 80)
+
+        # 遍历清洗报告字典
+        for table_name, report in self.cleaning_report.items():
+            print(f"\n📋 {table_name}:")
+            print(f"  原始: {report.get('original_rows', 0)} 行 × {report.get('original_cols', 0)} 列")
+            print(f"  清洗后: {report.get('cleaned_rows', 0)} 行 × {report.get('cleaned_cols', 0)} 列")
+            # 如果有操作记录，打印每条操作
+            if report.get('operations'):
+                for op in report['operations']:
+                    print(f"  - {op}")
+
+        print("=" * 80)
+
+
+# ============================================================
+# 第五部分：FraudDetector 类 - 负责欺诈检测
+# ============================================================
+
+class FraudDetector:
+    """
+    反欺诈检测器类
+
+    核心业务逻辑：
+    问题：多个不同的借款人申请贷款，钱都打给了同一个收款账户
+    检测方法：统计每个收款账号关联了多少个不同借款人
+    判定规则：如果超过阈值（默认10人），标记为可疑
+
+    业务场景：二手房抵押贷款中的"资金归集"欺诈模式
+    """
+
+    def __init__(self, config: dict = None):
+        """
+        初始化欺诈检测器
+
+        参数：
+            config: 配置字典，可以自定义检测参数，默认使用以下配置
+        """
+        # -------- 默认配置参数 --------
+        default_config = {
+            # min_borrowers：可疑阈值
+            # 超过多少个不同借款人即标记为可疑，默认10人
+            # 举例：如果10个不同借款人的钱都打给了同一个收款人，那就是可疑的
+            'min_borrowers': 10,
+
+            # max_payee_name_length：个人账户名最大长度
+            # 个人姓名通常不超过10个字符，60是宽限值
+            # 超过60的可能是企业账户名称，企业账户不参与个人欺诈检测
+            'max_payee_name_length': 60,
+
+            # product_code：只检测二手房贷款
+            # 一手房的钱打给开发商（企业），不存在个人收款账户归集问题
+            'product_code': 'MORTGAGE_SECOND_HAND',
+
+            # year_list：检查的年份范围
+            'year_list': [2023, 2024, 2025]
+        }
+
+        # 如果用户传入了自定义配置，更新默认配置
+        if config:
+            default_config.update(config)
+
+        # 保存配置到实例变量
+        self.config = default_config
+
+        # 存储检测结果
+        self.results = {}
+
+        logger.info("🔍 欺诈检测器初始化完成")
+        logger.info(f"   可疑阈值: {self.config['min_borrowers']} 个借款人")
+
+    def detect(self, cleaned_data: Dict[str, pd.DataFrame]) -> Dict[str, Any]:
+        """
+        执行欺诈检测主流程
+
+        检测步骤：
+        1. 提取各表数据
+        2. 筛选二手房贷款
+        3. 关联账户信息
+        4. 筛选有效个人账户
+        5. 统计每个收款账户关联的借款人数
+        6. 筛选超过阈值的可疑账户
+        7. 关联收款人姓名
+        8. 生成详细报告
+        9. 生成统计摘要
+
+        参数：
+            cleaned_data: 清洗后的数据字典（包含5张表）
+
+        返回值：
+            检测结果字典
+        """
+        logger.info("=" * 60)
+        logger.info("开始反欺诈检测...")
+        logger.info("=" * 60)
+
+        # -------- 步骤1：提取各表数据 --------
+        # .get()：如果表不存在，返回空的DataFrame，避免程序崩溃
+        loan_bill = cleaned_data.get('loan_bill', pd.DataFrame())
+        # loan_bill：贷款账单表，包含合同号、客户ID、放款日期、贷款余额等
+
+        loan_account = cleaned_data.get('loan_account', pd.DataFrame())
+        # loan_account：贷款账户表，包含合同号、收款账号、收款人姓名等
+
+        customer_prof = cleaned_data.get('customer_prof', pd.DataFrame())
+        # customer_prof：客户信息表，包含客户ID、客户姓名等
+
+        partner_org = cleaned_data.get('partner_org', pd.DataFrame())
+        # partner_org：合作伙伴表（中介机构信息）
+
+        project = cleaned_data.get('project', pd.DataFrame())
+        # project：项目表（贷款项目信息）
+
+        # -------- 检查关键数据表是否存在 --------
+        if loan_bill.empty:
+            logger.error("❌ 贷款账单表为空，无法执行检测")
+            return {
+                'suspicious_payee': pd.DataFrame(),
+                'report': pd.DataFrame(),
+                'summary': {'total_suspicious': 0}
+            }
+
+        if loan_account.empty:
+            logger.error("❌ 贷款账户表为空，无法执行检测")
+            return {
+                'suspicious_payee': pd.DataFrame(),
+                'report': pd.DataFrame(),
+                'summary': {'total_suspicious': 0}
+            }
+
+        # -------- 步骤2：筛选二手房贷款 --------
+        # 为什么只查二手房？
+        # 一手房：钱打给开发商（对公账户），收款人只有一个，没法造假
+        # 二手房：钱打给个人卖家，可以伪造虚假的卖房人
+        logger.info("步骤1: 筛选二手房贷款...")
+        product_code = self.config['product_code']  # 'MORTGAGE_SECOND_HAND'
+
+        # 筛选条件：
+        # 1. product_code 必须是 'MORTGAGE_SECOND_HAND'（二手房贷款）
+        # 2. 放款年份必须在指定的年份列表中
+        filtered_bill = loan_bill[
+            (loan_bill['product_code'] == product_code) &
+            (pd.to_datetime(loan_bill['lending_date']).dt.year.isin(self.config['year_list']))
+            ].copy()  # .copy()：创建副本，避免修改原始数据
+
+        logger.info(f"  二手房贷款: {len(filtered_bill)} 条")
+
+        # 如果没有符合条件的贷款，直接返回
+        if filtered_bill.empty:
+            logger.warning("⚠️ 没有符合条件的二手房贷款")
+            return {
+                'suspicious_payee': pd.DataFrame(),
+                'report': pd.DataFrame(),
+                'summary': {'total_suspicious': 0}
+            }
+
+        # -------- 步骤3：关联账户信息 --------
+        # 为什么需要关联？
+        # 贷款账单表有合同号和客户ID，但没有收款账号
+        # 贷款账户表有合同号和收款账号
+        # 通过合同号关联，就能知道每笔贷款的钱打给了谁
+        logger.info("步骤2: 关联账户信息...")
+
+        # pd.merge()：类似SQL的JOIN操作
+        # 左表：筛选后的贷款账单，右表：贷款账户
+        # on：关联字段，how='inner'：内连接，只保留两边都匹配的记录
+        merged = pd.merge(
+            filtered_bill,  # 左表
+            loan_account,  # 右表
+            on=['contract_id', 'snapshot_date'],  # 关联字段
+            how='inner'  # 连接方式
+        )
+
+        logger.info(f"  关联后数据: {len(merged)} 条")
+
+        # 如果关联后没有数据，说明账单和账户对不上
+        if merged.empty:
+            logger.warning("⚠️ 关联后没有数据，可能是合同号不匹配")
+            return {
+                'suspicious_payee': pd.DataFrame(),
+                'report': pd.DataFrame(),
+                'summary': {'total_suspicious': 0}
+            }
+
+        # -------- 步骤4：筛选有效收款账户（个人账户） --------
+        # 为什么需要筛选？
+        # 1. 排除空值（数据缺失）
+        # 2. 排除企业账户（名称过长）
+        # 3. 排除填充的默认值（UNKNOWN）
+        # 只保留个人账户，因为个人账户才可能存在"资金归集"问题
+        logger.info("步骤3: 筛选有效收款账户...")
+        max_name_len = self.config['max_payee_name_length']  # 60
+
+        # 5个筛选条件必须同时满足
+        valid_merged = merged[
+            # 条件1：收款账号不为空（.notna() 检查不是NaN）
+            merged['payee_account'].notna() &
+
+            # 条件2：收款人姓名不为空
+            merged['payee_account_name'].notna() &
+
+            # 条件3：收款人姓名去除首尾空格后不为空字符串
+            (merged['payee_account_name'].str.strip() != '') &
+
+            # 条件4：收款人姓名长度不超过60
+            # 个人姓名通常很短，超过60的可能是企业账户描述
+            (merged['payee_account_name'].str.strip().str.len() <= max_name_len) &
+
+            # 条件5：收款人姓名不是'UNKNOWN'
+            # 'UNKNOWN' 是之前数据清洗时填充的默认值
+            (merged['payee_account_name'] != 'UNKNOWN')
+            ].copy()
+
+        logger.info(f"  有效记录: {len(valid_merged)} 条")
+
+        # 如果没有有效记录，说明所有数据都有问题
+        if valid_merged.empty:
+            logger.warning("⚠️ 没有有效的个人收款账户")
+            return {
+                'suspicious_payee': pd.DataFrame(),
+                'report': pd.DataFrame(),
+                'summary': {'total_suspicious': 0}
+            }
+
+        # -------- 步骤5：统计每个收款账户关联的借款人数 --------
+        # 这是最核心的步骤！
+        # .groupby()：按收款账号分组
+        # .agg()：对每组进行聚合计算
+        logger.info("步骤4: 统计收款账户关联的借款人数...")
+        payee_stats = valid_merged.groupby('payee_account').agg({
+            'customer_id': 'nunique',  # nunique()：去重计数，统计不同借款人数量
+            'contract_id': 'count',  # count()：统计合同总数
+            'balance': 'sum'  # sum()：统计总金额
+        }).reset_index()  # reset_index()：将分组键变为普通列
+
+        # 重命名列名
+        payee_stats.columns = ['payee_account', 'borrower_cnt', 'contract_cnt', 'total_amount']
+
+        # 按借款人数从高到低排序
+        payee_stats = payee_stats.sort_values('borrower_cnt', ascending=False)
+
+        logger.info(f"  共 {len(payee_stats)} 个收款账户")
+
+        # -------- 步骤6：筛选可疑账户 --------
+        # 判定规则：借款人数 > 阈值（默认10人）即为可疑
+        logger.info("步骤5: 筛选可疑账户...")
+        min_borrowers = self.config['min_borrowers']  # 10
+
+        suspicious = payee_stats[payee_stats['borrower_cnt'] > min_borrowers].copy()
+
+        # 如果没有发现可疑账户
+        if suspicious.empty:
+            logger.info("✅ 未发现可疑账户")
+            return {
+                'suspicious_payee': suspicious,
+                'report': pd.DataFrame(),
+                'summary': {'total_suspicious': 0}
+            }
+
+        logger.info(f"  🚨 发现 {len(suspicious)} 个可疑收款账户")
+
+        # -------- 步骤7：关联收款人姓名 --------
+        # 可疑账户表里只有账号，没有姓名
+        # 从有效数据中提取账号对应的姓名
+        payee_names = valid_merged[['payee_account', 'payee_account_name']].drop_duplicates()
+        suspicious = suspicious.merge(payee_names, on='payee_account', how='left')
+
+        # -------- 步骤8：生成详细报告 --------
+        logger.info("步骤6: 生成详细报告...")
+        report = self._generate_detailed_report(
+            valid_merged,  # 有效数据
+            suspicious,  # 可疑账户列表
+            customer_prof,  # 客户信息
+            partner_org,  # 合作伙伴
+            project  # 项目信息
+        )
+
+        # -------- 步骤9：生成统计摘要 --------
+        summary = {
+            # 可疑账户总数
+            'total_suspicious': len(suspicious),
+            # 涉及合同数
+            'total_contracts': report['contract_id'].nunique() if not report.empty else 0,
+            # 涉及借款人数
+            'total_customers': report['customer_id'].nunique() if not report.empty else 0,
+            # 涉及总金额
+            'total_amount': report['balance'].sum() if not report.empty else 0,
+            # 最大单账户借款人数
+            'max_borrowers_per_account': suspicious['borrower_cnt'].max() if not suspicious.empty else 0
+        }
+
+        # -------- 存储结果 --------
+        self.results = {
+            'suspicious_payee': suspicious,  # 可疑账户列表
+            'report': report,  # 详细报告
+            'summary': summary,  # 统计摘要
+            'valid_data': valid_merged  # 有效数据
+        }
+
+        logger.info(f"检测完成: 发现 {summary['total_suspicious']} 个可疑账户")
+        logger.info(f"  涉及合同: {summary['total_contracts']} 份")
+        logger.info(f"  涉及借款人: {summary['total_customers']} 人")
+        logger.info(f"  涉及总金额: {summary['total_amount']:,.2f}")
+
+        return self.results
+
+    def _generate_detailed_report(self,
+                                  valid_data: pd.DataFrame,
+                                  suspicious: pd.DataFrame,
+                                  customer_prof: pd.DataFrame,
+                                  partner_org: pd.DataFrame,
+                                  project: pd.DataFrame) -> pd.DataFrame:
+        """
+        生成详细报告（内部方法）
+
+        将可疑账户涉及的所有交易记录展开，并关联客户信息、合作伙伴、项目等维度
+
+        参数：
+            valid_data: 有效数据
+            suspicious: 可疑账户列表
+            customer_prof: 客户信息表
+            partner_org: 合作伙伴表
+            project: 项目表
+
+        返回值：
+            详细报告DataFrame
+        """
+        # -------- 步骤1：只保留涉及可疑账户的记录 --------
+        # .isin()：检查payee_account是否在可疑账户列表中
+        report_data = valid_data[
+            valid_data['payee_account'].isin(suspicious['payee_account'])
+        ].copy()
+
+        if report_data.empty:
+            return pd.DataFrame()
+
+        # -------- 步骤2：关联客户信息（获取借款人姓名） --------
+        report_data = report_data.merge(
+            customer_prof[['customer_id', 'full_name']],
+            on='customer_id',
+            how='left'
+        )
+        # 如果客户信息中没有匹配的，填充"未知客户"
+        report_data['full_name'] = report_data['full_name'].fillna('未知客户')
+
+        # -------- 步骤3：关联合作伙伴信息 --------
+        if 'partner_org_id' in report_data.columns and not partner_org.empty:
+            report_data = report_data.merge(
+                partner_org[['partner_org_id', 'corporate_name']],
+                on='partner_org_id',
+                how='left'
+            )
+            report_data['corporate_name'] = report_data['corporate_name'].fillna('无')
+
+        # -------- 步骤4：关联项目信息 --------
+        if 'project_id' in report_data.columns and not project.empty:
+            report_data = report_data.merge(
+                project[['project_id', 'project_code', 'project_name']],
+                on='project_id',
+                how='left'
+            )
+            report_data['project_name'] = report_data['project_name'].fillna('无')
+
+        # -------- 步骤5：关联可疑账户统计信息 --------
+        report_data = report_data.merge(
+            suspicious[['payee_account', 'borrower_cnt']],
+            on='payee_account',
+            how='left'
+        )
+
+        # -------- 步骤6：选择输出字段 --------
+        # 核心字段
+        output_columns = [
+            'payee_account',  # 收款账号
+            'payee_account_name',  # 收款人姓名
+            'borrower_cnt',  # 关联借款人数
+            'contract_id',  # 合同号
+            'customer_id',  # 借款人ID
+            'full_name',  # 借款人姓名
+            'balance',  # 贷款余额
+            'lending_date',  # 放款日期
+            'branch_id',  # 支行
+            'loan_classification',  # 贷款分类
+            'product_code'  # 产品代码
+        ]
+
+        # 可选字段
+        optional_columns = ['corporate_name', 'project_name', 'partner_org_id', 'project_code']
+        for col in optional_columns:
+            if col in report_data.columns:
+                output_columns.append(col)
+
+        # 只保留存在的列
+        existing_columns = [col for col in output_columns if col in report_data.columns]
+        report = report_data[existing_columns].copy()
+
+        # -------- 步骤7：排序 --------
+        if 'borrower_cnt' in report.columns:
+            report = report.sort_values(
+                ['borrower_cnt', 'lending_date'],
+                ascending=[False, True]  # 降序、升序
+            )
+
+        return report
+
+    def print_summary(self):
+        """打印检测结果摘要"""
+        if not self.results:
+            print("⚠️ 请先执行 detect() 方法进行检测")
+            return
+
+        summary = self.results.get('summary', {})
+
+        print("\n" + "=" * 60)
+        print("📊 反欺诈检测报告")
+        print("=" * 60)
+        print(f"  🚨 发现可疑账户: {summary.get('total_suspicious', 0)} 个")
+        print(f"  📋 涉及合同: {summary.get('total_contracts', 0)} 份")
+        print(f"  👤 涉及借款人: {summary.get('total_customers', 0)} 人")
+        print(f"  💰 涉及总金额: {summary.get('total_amount', 0):,.2f}")
+        print(f"  🔝 最大单账户借款人数: {summary.get('max_borrowers_per_account', 0)} 人")
+        print("=" * 60)
+
+        suspicious = self.results.get('suspicious_payee', pd.DataFrame())
+        if not suspicious.empty:
+            print("\n🔝 TOP5 可疑账户:")
+            print("-" * 60)
+            top5 = suspicious.head(5)
+            for idx, row in top5.iterrows():
+                print(f"  {row['payee_account_name']}")
+                print(f"    借款人数: {row['borrower_cnt']}")
+                print(f"    合同数: {row['contract_cnt']}")
+                print(f"    总金额: {row['total_amount']:,.2f}")
+                print("-" * 40)
+
+
+# ============================================================
+# 第六部分：ReportGenerator 类 - 负责生成报告和图表
+# ============================================================
+
+class ReportGenerator:
+    """
+    报告生成器类
+
+    功能：
+    1. 生成Excel报告（包含多个sheet）
+    2. 生成可视化图表（PNG图片）
+    """
+
+    def __init__(self, output_dir: str = './reports'):
+        """
+        初始化报告生成器
+
+        参数：
+            output_dir: 输出目录
+        """
+        self.output_dir = output_dir
+        os.makedirs(output_dir, exist_ok=True)
+        logger.info(f"📊 报告生成器初始化完成，输出目录: {output_dir}")
+
+    def generate_excel_report(self, results: Dict[str, Any]) -> str:
+        """
+        生成Excel报告
+
+        包含3个sheet：
+        1. 可疑交易明细
+        2. 可疑账户汇总
+        3. 统计摘要
+
+        参数：
+            results: 检测结果字典
+
+        返回值：
+            生成的文件路径
+        """
+        suspicious = results.get('suspicious_payee', pd.DataFrame())
+        report_df = results.get('report', pd.DataFrame())
+        summary = results.get('summary', {})
+
+        if suspicious.empty and report_df.empty:
+            logger.warning("⚠️ 无可疑数据，跳过报告生成")
+            return None
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        file_path = os.path.join(self.output_dir, f'fraud_report_{timestamp}.xlsx')
+
+        with pd.ExcelWriter(file_path, engine='openpyxl') as writer:
+            if not report_df.empty:
+                report_df.to_excel(writer, sheet_name='可疑交易明细', index=False)
+                logger.info(f"  写入可疑交易明细: {len(report_df)} 行")
+
+            if not suspicious.empty:
+                suspicious_display = suspicious.copy()
+                suspicious_display['排名'] = range(1, len(suspicious_display) + 1)
+                suspicious_display.to_excel(writer, sheet_name='可疑账户汇总', index=False)
+                logger.info(f"  写入可疑账户汇总: {len(suspicious_display)} 行")
+
+            if summary:
+                summary_df = pd.DataFrame([
+                    {'指标': '可疑账户数', '数值': summary.get('total_suspicious', 0)},
+                    {'指标': '涉及合同数', '数值': summary.get('total_contracts', 0)},
+                    {'指标': '涉及借款人数', '数值': summary.get('total_customers', 0)},
+                    {'指标': '涉及总金额', '数值': f"{summary.get('total_amount', 0):,.2f}"},
+                    {'指标': '最大单账户借款人数', '数值': summary.get('max_borrowers_per_account', 0)}
+                ])
+                summary_df.to_excel(writer, sheet_name='统计摘要', index=False)
+                logger.info(f"  写入统计摘要")
+
+        logger.info(f"✅ Excel报告已生成: {file_path}")
+        return file_path
+
+    def generate_charts(self, results: Dict[str, Any]) -> str:
+        """
+        生成可视化图表
+
+        生成4张图表：
+        1. TOP10可疑账户（按借款人数）
+        2. TOP10可疑账户（按金额）
+        3. 可疑账户的借款人数分布
+        4. 可疑交易的贷款分类分布
+
+        参数：
+            results: 检测结果字典
+
+        返回值：
+            生成的文件路径
+        """
+        suspicious = results.get('suspicious_payee', pd.DataFrame())
+        report_df = results.get('report', pd.DataFrame())
+
+        if suspicious.empty:
+            logger.warning("⚠️ 无可疑数据，跳过图表生成")
+            return None
+
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError:
+            logger.warning("⚠️ matplotlib未安装，跳过图表生成")
+            logger.info("  安装命令: pip install matplotlib")
+            return None
+
+        try:
+            plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'Arial Unicode MS']
+            plt.rcParams['axes.unicode_minus'] = False
+        except:
+            pass
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        file_path = os.path.join(self.output_dir, f'fraud_charts_{timestamp}.png')
+
+        fig, axes = plt.subplots(2, 2, figsize=(14, 12))
+
+        # 图1：TOP10可疑账户（按借款人数）
+        ax1 = axes[0, 0]
+        if not suspicious.empty:
+            top10 = suspicious.nlargest(10, 'borrower_cnt')
+            ax1.barh(top10['payee_account_name'], top10['borrower_cnt'], color='coral')
+            ax1.set_xlabel('借款人数', fontsize=12)
+            ax1.set_title('TOP10 可疑账户（按借款人数）', fontsize=14)
+            ax1.invert_yaxis()
+
+        # 图2：TOP10可疑账户（按金额）
+        ax2 = axes[0, 1]
+        if not suspicious.empty:
+            top10_amount = suspicious.nlargest(10, 'total_amount')
+            ax2.barh(top10_amount['payee_account_name'], top10_amount['total_amount'] / 10000, color='skyblue')
+            ax2.set_xlabel('总金额（万元）', fontsize=12)
+            ax2.set_title('TOP10 可疑账户（按金额）', fontsize=14)
+            ax2.invert_yaxis()
+
+        # 图3：可疑账户的借款人数分布
+        ax3 = axes[1, 0]
+        if not suspicious.empty:
+            bins = [10, 20, 30, 50, 100, 200]
+            labels = ['10-20', '20-30', '30-50', '50-100', '100-200']
+            suspicious['borrower_bin'] = pd.cut(
+                suspicious['borrower_cnt'],
+                bins=bins,
+                labels=labels,
+                right=False
+            )
+            bin_counts = suspicious['borrower_bin'].value_counts().sort_index()
+            bin_counts.plot(kind='bar', ax=ax3, color='lightgreen')
+            ax3.set_xlabel('借款人数区间', fontsize=12)
+            ax3.set_ylabel('账户数', fontsize=12)
+            ax3.set_title('可疑账户的借款人数分布', fontsize=14)
+            ax3.tick_params(axis='x', rotation=45)
+
+        # 图4：可疑交易的贷款分类分布
+        ax4 = axes[1, 1]
+        if not report_df.empty and 'loan_classification' in report_df.columns:
+            class_counts = report_df['loan_classification'].value_counts()
+            colors = ['#66b3ff', '#99ff99', '#ffcc99', '#ff9999', '#ff6666']
+            class_counts.plot(
+                kind='pie',
+                ax=ax4,
+                autopct='%1.1f%%',
+                colors=colors[:len(class_counts)],
+                startangle=90
+            )
+            ax4.set_title('可疑交易的贷款分类分布', fontsize=14)
+            ax4.set_ylabel('')
+
+        plt.tight_layout()
+        plt.savefig(file_path, dpi=150, bbox_inches='tight')
+        plt.close()
+
+        logger.info(f"✅ 图表已生成: {file_path}")
+        return file_path
+
+
+# ============================================================
+# 第七部分：主函数
+# ============================================================
+
+def main():
+    """
+    主函数：程序从这里开始执行
+
+    完整流程：
+    1. 读取数据（或生成模拟数据）
+    2. 清洗数据
+    3. 欺诈检测
+    4. 生成报告和图表
+    5. 保存结果
+    """
+    print("\n" + "=" * 80)
+    print("  数据读取 + 数据清洗 + 欺诈检测 完整流程")
+    print("=" * 80)
+
+    # -------- 步骤1：创建数据读取器 --------
+    reader = DataReader(data_dir='./data')
+
+    # -------- 步骤2：生成模拟数据 --------
+    # n=500 表示生成500条贷款记录
+    raw_data = reader.generate_sample_data(n=500)
+
+    # -------- 步骤3：显示数据摘要 --------
+    reader.show_summary()
+
+    # -------- 步骤4：预览数据 --------
+    # 预览贷款账户表的前5行
+    reader.preview('loan_account', n=5)
+
+    # -------- 步骤5：创建数据清洗器并清洗数据 --------
+    cleaner = DataCleaner()
+    cleaned_data = cleaner.clean_all(raw_data)
+
+    # -------- 步骤6：显示清洗报告 --------
+    cleaner.show_cleaning_report()
+
+    # -------- 步骤7：创建欺诈检测器并执行检测 --------
+    detector = FraudDetector()
+    results = detector.detect(cleaned_data)
+
+    # -------- 步骤8：打印检测摘要 --------
+    detector.print_summary()
+
+    # -------- 步骤9：生成报告和图表 --------
+    reporter = ReportGenerator(output_dir='./reports')
+    reporter.generate_excel_report(results)
+    reporter.generate_charts(results)
+
+    # -------- 步骤10：保存清洗后的数据 --------
+    reader.save_to_csv(cleaned_data, output_dir='./cleaned_data')
+
+    print("\n" + "=" * 80)
+    print("✅ 全部流程执行完成！")
+    print("=" * 80)
+
+    return cleaned_data, results
+
+
+# ============================================================
+# 第八部分：程序入口
+# ============================================================
+
+# 如果这个文件是直接运行的（不是被导入的），执行main函数
+if __name__ == "__main__":
+    cleaned_data, results = main()
