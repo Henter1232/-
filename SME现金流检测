@@ -1,0 +1,898 @@
+"""
+SME关联方现金流集中度检测系统 v1.0
+=====================================
+功能：识别小微企业贷款前180天经营现金流中，来自关联方的占比是否过高
+作者：根据开源SQL模型重构为Python版本
+"""
+
+# ============================================================
+# 第1部分：导入依赖库
+# ============================================================
+
+import pandas as pd  # 数据处理核心库，用于DataFrame操作、分组聚合、数据清洗
+import numpy as np  # 数值计算库，用于数组运算、百分比计算、条件判断
+import matplotlib.pyplot as plt  # 绘图库，用于生成风险分布图、柱状图、饼图等
+from datetime import datetime, timedelta  # datetime表示具体日期，timedelta表示时间间隔（如180天）
+from pathlib import Path  # 跨平台路径处理，自动适配Windows/Linux/Mac的路径分隔符
+import random  # 随机数库，用于生成模拟数据（随机选择交易对手、金额等）
+import warnings  # 警告管理库
+warnings.filterwarnings('ignore')  # 忽略Pandas等库产生的运行时警告，让输出更干净
+
+
+# ============================================================
+# 第2部分：配置类 —— 集中管理所有参数
+# ============================================================
+
+class Config:
+    """
+    系统配置类
+    作用：把所有可调参数集中在这里，方便修改和调优
+    修改任意参数后，不需要改动其他代码
+    """
+
+    def __init__(self):
+        # ---------- 路径配置 ----------
+        # __file__ 是当前文件的路径，.parent 获取上一级目录（即项目根目录）
+        # 如果在Jupyter中运行，__file__可能不存在，就用当前工作目录 Path.cwd()
+        self.BASE_DIR = Path(__file__).parent if '__file__' in dir() else Path.cwd()
+
+        # 数据目录：项目根目录/data，用于存放CSV数据文件
+        self.DATA_PATH = self.BASE_DIR / "data"
+
+        # 输出目录：项目根目录/output，用于存放风险报告和图表
+        self.OUTPUT_PATH = self.BASE_DIR / "output"
+
+        # 创建输出目录，exist_ok=True 表示如果目录已存在则不报错
+        self.OUTPUT_PATH.mkdir(exist_ok=True)
+
+        # 创建数据目录
+        self.DATA_PATH.mkdir(exist_ok=True)
+
+        # ---------- 业务参数 ----------
+        # 回溯天数：只分析放款前多少天内的交易，对应SQL中的 LOOKBACK_DAYS
+        self.LOOKBACK_DAYS = 180
+
+        # 关联方占比告警阈值：超过50%就触发告警，对应SQL中的 RELATED_PARTY_RATIO_THRESHOLD
+        self.RELATED_PARTY_RATIO_THRESHOLD = 0.50
+
+        # 快照日期：分析截止日期，所有数据以这一天为基准
+        # .date() 去掉时间部分，只保留年月日
+        self.SNAPSHOT_DATE = datetime(2026, 8, 15).date()
+
+        # ---------- 风险分级阈值 ----------
+        # 占比 ≥ 80% → 高风险
+        self.HIGH_RISK_THRESHOLD = 0.80
+
+        # 占比 ≥ 50% → 中风险
+        self.MEDIUM_RISK_THRESHOLD = 0.50
+
+        # 占比 ≥ 30% → 低风险
+        self.LOW_RISK_THRESHOLD = 0.30
+
+        # ---------- 非经营交易关键词 ----------
+        # 如果交易摘要中包含这些词，则判定为非经营交易，需要过滤掉
+        # 对应SQL中的 NOT LIKE '%BANK%'、NOT LIKE '%LOAN%' 等条件
+        self.EXCLUDE_KEYWORDS = [
+            'BANK',      # 银行相关
+            'LOAN',      # 贷款
+            'REPAYMENT', # 还款
+            'REFUND',    # 退款
+            '利息',       # 利息支付
+            '本金',       # 本金偿还
+            '还款',       # 还款
+            '放款',       # 放款
+            '工资'        # 工资发放
+        ]
+
+
+# ============================================================
+# 第3部分：数据生成函数 —— 生成模拟数据用于测试
+# ============================================================
+
+def generate_all_data(config):
+    """
+    一次性生成所有数据，确保关联方关系一致性
+    这是整个系统的数据源头，生成4张表：贷款、交易、客户、集团关系
+    """
+    print("\n📊 生成模拟数据...")
+
+    # 设置随机种子，固定后每次运行生成的"随机"数据都一样，便于调试
+    # 42是常用的"魔法数字"，你也可以改成其他数字
+    np.random.seed(42)
+    random.seed(42)
+
+    # ---------- 3.1 创建集团 ----------
+    # 生成200个客户
+    n = 200
+
+    # 生成20个集团ID：GROUP_001, GROUP_002, ..., GROUP_020
+    # f-string格式化，:03d 表示三位数字，不足补0
+    # 列表推导式：[表达式 for 变量 in 范围]
+    groups = [f'GROUP_{i:03d}' for i in range(1, 21)]
+
+    # ---------- 3.2 生成客户 ----------
+    # 生成200个客户ID：CUST_00001, CUST_00002, ..., CUST_00200
+    # range(1, n+1) 产生 1到200，:05d 表示五位数字
+    customer_ids = [f'CUST_{i:05d}' for i in range(1, n + 1)]
+
+    # 20个公司名称池，用于给客户起名
+    company_names = [
+        '鑫源贸易', '鼎盛科技', '宏远供应链', '天诚商贸', '联创投资',
+        '华信实业', '九州进出口', '恒通物流', '瑞祥咨询', '万通建筑',
+        '亿达信息', '中盛传媒', '金源制造', '银海服务', '瑞丰集团',
+        '恒达实业', '万达贸易', '宏图科技', '嘉和投资', '盛达物流'
+    ]
+
+    # 空字典：用于存储 客户ID → 集团ID 的映射
+    # 例如：{'CUST_00001': 'GROUP_001', 'CUST_00002': 'GROUP_002', ...}
+    customer_groups = {}
+
+    # 空字典：用于存储 客户ID → 客户名称 的映射
+    # 例如：{'CUST_00001': '鑫源贸易_001', 'CUST_00002': '鼎盛科技_002', ...}
+    customer_names = {}
+
+    # enumerate() 同时获取索引 i 和值 cust_id
+    # i=0 时 cust_id='CUST_00001'，i=1 时 cust_id='CUST_00002' ...
+    for i, cust_id in enumerate(customer_ids):
+        # 取模运算：0%20=0，1%20=1，... 19%20=19，20%20=0（轮询）
+        # 效果：每20个客户一组，均匀分配到20个集团
+        group_idx = i % len(groups)
+        group = groups[group_idx]
+        customer_groups[cust_id] = group  # 存入字典
+
+        # 同理轮询分配公司名
+        name_idx = i % len(company_names)
+        # f'{变量}_{i:03d}' 生成如 '鑫源贸易_001'，确保名称唯一
+        customer_names[cust_id] = f'{company_names[name_idx]}_{i:03d}'
+
+    # ---------- 3.3 生成贷款数据 ----------
+    # 空列表，准备存放所有贷款记录
+    loans = []
+
+    for i, cust_id in enumerate(customer_ids):
+        # 放款日期 = 快照日期 - 随机30-365天
+        # random.randint(30, 365) 生成30到365之间的随机整数
+        # timedelta(days=...) 创建时间间隔，日期相减得到新日期
+        disbursement_date = config.SNAPSHOT_DATE - timedelta(days=random.randint(30, 365))
+
+        # 把一条贷款记录添加到列表
+        # 字典的键就是DataFrame的列名
+        loans.append({
+            'customer_id': cust_id,                           # 客户ID
+            'loan_contract_id': f'LN_{i:06d}',               # 贷款合同号，6位数字
+            'disbursement_date': disbursement_date,           # 放款日期
+            'loan_amount': round(random.uniform(50000, 5000000), 2),  # 贷款金额5万-500万，保留2位小数
+            'account_number': f'ACC_{i:06d}',                # 账户号
+            'party_name': customer_names[cust_id],           # 客户名称
+            'group_id': customer_groups[cust_id]             # 所属集团
+        })
+
+    # 把列表转换为Pandas DataFrame（类似Excel表格）
+    loans_df = pd.DataFrame(loans)
+
+    # ---------- 3.4 生成交易数据（最核心的部分） ----------
+    # 空列表，准备存放所有交易记录
+    transactions = []
+
+    # iterrows() 遍历DataFrame的每一行，返回(索引, 行数据)
+    # 用 _ 表示忽略索引，只取行数据
+    for _, loan in loans_df.iterrows():
+        # 从一行贷款数据中提取7个字段
+        cust_id = loan['customer_id']                # 客户ID
+        group = loan['group_id']                     # 所属集团
+        account = loan['account_number']             # 账户号
+        loan_id = loan['loan_contract_id']           # 贷款合同号
+        disbursement_date = loan['disbursement_date'] # 放款日期
+        party_name = loan['party_name']              # 客户名称
+
+        # 找到同集团的其他客户（作为关联方）
+        # 第一步：从贷款表中筛选出同集团的客户ID列表
+        same_group_customers = loans_df[loans_df['group_id'] == group]['customer_id'].tolist()
+
+        # 第二步：排除自己（只保留关联方）
+        # 列表推导式：[新元素 for 元素 in 原列表 if 条件]
+        same_group_customers = [c for c in same_group_customers if c != cust_id]
+
+        # 第三步：取出这些关联方的客户名称
+        # .isin() 判断是否在列表中，返回布尔Series
+        related_names = loans_df[loans_df['customer_id'].isin(same_group_customers)]['party_name'].tolist()
+        # 结果示例：['鑫源贸易_002', '鼎盛科技_005', '宏远供应链_003']
+
+        # 外部交易对手列表（非关联方）
+        # 这些是独立的外部客户、银行、个人
+        external_names = [
+            'ABC贸易有限公司', 'XYZ科技集团', '外部供应商_01', '外部客户_02',
+            'BANK OF CHINA', 'ICBC', '建设银行', '招商银行',
+            '王某', '李某', '张某', '刘某'
+        ]
+
+        # 每个客户生成60-120笔交易
+        n_trans = random.randint(60, 120)
+
+        for _ in range(n_trans):
+            # 交易日期：放款日往前推0-180天中的某一天
+            days_offset = random.randint(0, 180)
+            trans_date = disbursement_date - timedelta(days=days_offset)
+
+            # 交易金额：500-50万元之间的随机数
+            amount = random.uniform(500, 500000)
+
+            # 判断收入还是支出
+            # random.random() 生成0-1之间的随机浮点数
+            # < 0.7 表示70%概率为True
+            is_credit = random.random() < 0.7
+            # 三元表达式：True取'CREDIT'，False取'DEBIT'
+            direction = 'CREDIT' if is_credit else 'DEBIT'
+
+            # ---------- 确定交易对手和摘要 ----------
+            if is_credit:
+                # 收入交易：40%来自关联方，60%来自外部
+                # 注意：related_names 非空且随机数<0.40
+                if related_names and random.random() < 0.40:
+                    # 来自关联方
+                    counterparty = random.choice(related_names)  # 从关联方列表中随机选一个
+                    memo = random.choice(['货款', '服务费', '咨询费', '租金', '内部结算'])
+                else:
+                    # 来自外部
+                    counterparty = random.choice(external_names)
+                    memo = random.choice(['货款', '服务费', '咨询费', '租金', '项目款'])
+            else:
+                # 支出交易：都流向外部（供应商、服务商等）
+                # 用 + 拼接两个列表
+                counterparty = random.choice(external_names + ['供应商A', '供应商B'])
+                memo = random.choice(['采购款', '服务费', '租金', '工资', '税费'])
+
+            # 5%的概率把摘要改成"非经营"关键词
+            # 用于测试关键词过滤功能是否正常工作
+            if random.random() < 0.05:
+                memo = random.choice(['LOAN', 'REPAYMENT', 'REFUND', '利息', '本金还款'])
+
+            # 把一笔交易的11个字段添加到列表
+            transactions.append({
+                'party_id': cust_id,                    # 客户ID（交易主体）
+                'party_name': party_name,              # 客户名称
+                'account_number': account,             # 账户号
+                'loan_contract_id': loan_id,           # 贷款合同号
+                'disbursement_date': disbursement_date, # 放款日期（每条交易都带上，便于后续过滤）
+                'transaction_date': trans_date,        # 交易日期
+                'transaction_amount': amount,          # 交易金额
+                'debit_credit_code': direction,        # 借贷方向：CREDIT=收入，DEBIT=支出
+                'counterparty_account_name': counterparty,  # 交易对手名称
+                'transaction_memo': memo,              # 交易摘要
+                'group_id': group                      # 所属集团
+            })
+
+    # 所有交易转为DataFrame
+    transactions_df = pd.DataFrame(transactions)
+
+    # ---------- 3.5 生成集团关系表 ----------
+    # 用于后续关联方匹配
+    relations = []
+
+    # 遍历20个集团
+    for group in groups:
+        # 获取该集团下的所有客户ID
+        group_customers = loans_df[loans_df['group_id'] == group]['customer_id'].tolist()
+
+        # 遍历集团内的每个借款人
+        for borrower in group_customers:
+            # 遍历集团内的每个客户（作为关联方）
+            for related in group_customers:
+                # 排除自己
+                if borrower != related:
+                    # 获取关联方的客户名称
+                    related_name = loans_df[loans_df['customer_id'] == related]['party_name'].iloc[0]
+                    # 添加一条关系记录
+                    relations.append({
+                        'borrower_id': borrower,                    # 借款人ID
+                        'related_party_id': related,                # 关联方ID
+                        'related_party_name': related_name,         # 关联方名称（与交易中的名称完全一致！）
+                        'group_id': group,                          # 集团ID
+                        'effective_date': config.SNAPSHOT_DATE      # 生效日期
+                    })
+
+    relations_df = pd.DataFrame(relations)
+
+    # ---------- 3.6 生成客户信息表 ----------
+    # 从贷款表中提取客户信息，去重
+    # .rename() 重命名列，.drop_duplicates() 去除重复行
+    customers_df = loans_df[['customer_id', 'party_name']].rename(
+        columns={'customer_id': 'party_id', 'party_name': 'party_name'}
+    ).drop_duplicates()
+
+    # ---------- 3.7 保存数据到CSV文件 ----------
+    # .to_csv() 保存为CSV格式
+    # index=False 表示不保存行索引（避免多余列）
+    loans_df.to_csv(config.DATA_PATH / "sme_loans.csv", index=False)
+    transactions_df.to_csv(config.DATA_PATH / "account_transactions.csv", index=False)
+    relations_df.to_csv(config.DATA_PATH / "credit_group_relationships.csv", index=False)
+    customers_df.to_csv(config.DATA_PATH / "corporate_customer.csv", index=False)
+
+    # 打印数据摘要
+    print(f"\n   📊 数据摘要:")
+    print(f"   - 贷款: {len(loans_df)} 笔")
+    print(f"   - 交易: {len(transactions_df):,} 条")
+    print(f"   - 集团关系: {len(relations_df):,} 条")
+    print(f"   - 客户: {len(customers_df)} 个")
+
+    return loans_df, customers_df, transactions_df, relations_df
+
+
+def load_or_generate_data(config):
+    """
+    加载或生成数据
+    如果CSV文件已存在则加载，否则生成新数据
+    """
+    print("\n📂 加载/生成数据...")
+
+    # 检查贷款文件是否存在
+    loans_file = config.DATA_PATH / "sme_loans.csv"
+    if loans_file.exists():
+        # 读取CSV，parse_dates 将指定列解析为日期类型
+        loans = pd.read_csv(loans_file, parse_dates=['disbursement_date'])
+        customers = pd.read_csv(config.DATA_PATH / "corporate_customer.csv")
+        transactions = pd.read_csv(
+            config.DATA_PATH / "account_transactions.csv",
+            parse_dates=['transaction_date', 'disbursement_date']
+        )
+        relations = pd.read_csv(
+            config.DATA_PATH / "credit_group_relationships.csv",
+            parse_dates=['effective_date']
+        )
+        print("   ✅ 从文件加载数据")
+    else:
+        # 文件不存在，生成新数据
+        loans, customers, transactions, relations = generate_all_data(config)
+
+    print(f"\n   📊 数据摘要:")
+    print(f"   - 贷款: {len(loans)} 笔")
+    print(f"   - 客户: {len(customers)} 个")
+    print(f"   - 交易: {len(transactions):,} 条")
+    print(f"   - 集团关系: {len(relations):,} 条")
+
+    return loans, customers, transactions, relations
+
+
+# ============================================================
+# 第4部分：核心分析类 —— 对应SQL的所有逻辑
+# ============================================================
+
+class CashFlowAnalyzer:
+    """
+    现金流分析器
+    实现SQL中的核心计算逻辑：
+    1. 计算总经营流入
+    2. 计算关联方经营流入
+    3. 计算风险指标（占比）
+    """
+
+    def __init__(self, config):
+        """构造函数，接收配置对象"""
+        self.config = config                      # 保存配置
+        self.operational_transactions = None      # 经营交易数据（后续会填充）
+        self.related_transactions = None          # 关联方交易数据（后续会填充）
+
+    def calculate_total_operating_inflow(self, loans, customers, transactions):
+        """
+        计算总经营流入
+        对应SQL中的 operating_transactions + total_operating_inflow
+
+        步骤：
+        1. 只保留收入交易 (debit_credit_code == 'CREDIT')
+        2. 过滤放款前180天内的交易
+        3. 排除交易对手是自己的交易
+        4. 用关键词过滤非经营交易
+        5. 按客户分组汇总
+        """
+        print("      - 开始分析...")
+
+        # ---- 步骤1：只保留收入交易 ----
+        # .copy() 创建副本，避免修改原始数据
+        inflow = transactions[transactions['debit_credit_code'] == 'CREDIT'].copy()
+        print(f"      - 收入交易: {len(inflow)} 条")
+
+        # ---- 步骤2：过滤日期（放款前180天内） ----
+        # 计算放款日往前180天的日期
+        before_date = inflow['disbursement_date'] - pd.Timedelta(days=self.config.LOOKBACK_DAYS)
+        # 同时满足两个条件：交易日期 >= 放款日-180天 AND 交易日期 <= 放款日
+        inflow = inflow[
+            (inflow['transaction_date'] >= before_date) &
+            (inflow['transaction_date'] <= inflow['disbursement_date'])
+        ].copy()
+        print(f"      - 窗口内交易: {len(inflow)} 条")
+
+        # ---- 步骤3：排除交易对手是自己 ----
+        # .notna() 检查不是空值
+        # party_name != counterparty_account_name 排除自己给自己转账
+        inflow = inflow[
+            (inflow['party_name'].notna()) &
+            (inflow['counterparty_account_name'].notna()) &
+            (inflow['party_name'] != inflow['counterparty_account_name'])
+        ].copy()
+        print(f"      - 排除自我交易后: {len(inflow)} 条")
+
+        # ---- 步骤4：过滤非经营关键词 ----
+        # 定义内部函数：判断一笔交易是否为经营交易
+        def is_operational(row):
+            # row.get('transaction_memo', '') 取memo字段，若不存在则返回空字符串
+            # .upper() 转大写，便于关键词匹配（大小写不敏感）
+            combined = str(row.get('transaction_memo', '')).upper()
+            # any() 检查是否包含任意关键词
+            # 不包含任何关键词 → True（是经营交易）
+            return not any(kw.upper() in combined for kw in self.config.EXCLUDE_KEYWORDS)
+
+        # apply(函数, axis=1) 对每一行应用函数
+        # axis=1 表示按行操作（逐行处理），axis=0 表示按列操作
+        inflow['is_operational'] = inflow.apply(is_operational, axis=1)
+        # 只保留经营交易
+        operational = inflow[inflow['is_operational'] == True].copy()
+        print(f"      - 过滤非经营交易后: {len(operational)} 条")
+
+        # ---- 步骤5：按客户分组汇总 ----
+        # groupby() 按指定列分组
+        # .agg({'transaction_amount': 'sum'}) 对金额列求和
+        # .reset_index() 重置索引，让分组列变回普通列
+        total_inflow = operational.groupby([
+            'party_id', 'party_name', 'account_number',
+            'loan_contract_id', 'disbursement_date'
+        ]).agg({'transaction_amount': 'sum'}).reset_index()
+
+        # 重命名列：transaction_amount → total_operating_inflow
+        total_inflow.rename(columns={'transaction_amount': 'total_operating_inflow'}, inplace=True)
+
+        # 保存经营交易数据到实例变量，供后续方法使用
+        self.operational_transactions = operational
+
+        return total_inflow
+
+    def calculate_related_party_inflow(self, group_relations):
+        """
+        计算关联方经营流入
+        对应SQL中的 related_party_transactions + related_party_inflow
+
+        步骤：
+        1. 构建 borrower → {关联方名称列表} 的映射字典
+        2. 判断每笔经营交易的对手是否为关联方
+        3. 按客户分组汇总关联方流入
+        """
+        # 检查是否有经营交易数据（必须先调用 calculate_total_operating_inflow）
+        if self.operational_transactions is None or len(self.operational_transactions) == 0:
+            return pd.DataFrame()
+
+        # ---- 步骤1：构建关联方映射表 ----
+        # 空字典，结构：{borrower_id: {关联方名称1, 关联方名称2, ...}}
+        related_map = {}
+
+        # iterrows() 遍历集团关系表的每一行
+        for _, row in group_relations.iterrows():
+            borrower = row['borrower_id']        # 借款人ID
+            related_name = row['related_party_name']  # 关联方名称
+            if borrower not in related_map:
+                related_map[borrower] = set()    # 使用set自动去重
+            related_map[borrower].add(related_name)
+
+        # ---- 步骤2：判断每笔交易是否为关联方交易 ----
+        operational = self.operational_transactions.copy()
+
+        def is_related_party(row):
+            borrower = row['party_id']                    # 交易主体
+            counterparty = str(row.get('counterparty_account_name', ''))  # 交易对手
+
+            # 如果该客户没有关联方，返回False
+            if borrower not in related_map:
+                return False
+            # 如果交易对手为空，返回False
+            if not counterparty:
+                return False
+            # 检查交易对手名称是否包含关联方名称（子串匹配）
+            # 注意：这里用 in 而不是 ==，容忍名称的细微差异
+            for rel in related_map[borrower]:
+                if rel in counterparty:
+                    return True
+            return False
+
+        # 对每笔交易判断是否为关联方交易
+        operational['is_related'] = operational.apply(is_related_party, axis=1)
+        # 只保留关联方交易
+        related = operational[operational['is_related'] == True].copy()
+
+        if len(related) == 0:
+            print("      ⚠️ 没有匹配到关联方交易（检查关联方名称是否一致）")
+            return pd.DataFrame()
+
+        # ---- 步骤3：按客户分组汇总关联方流入 ----
+        related_inflow = related.groupby([
+            'party_id', 'party_name', 'account_number',
+            'loan_contract_id', 'disbursement_date'
+        ]).agg({'transaction_amount': 'sum'}).reset_index()
+        related_inflow.rename(columns={'transaction_amount': 'related_party_operating_inflow'}, inplace=True)
+
+        # 保存关联方交易数据
+        self.related_transactions = related
+        print(f"      - 匹配到关联方交易: {len(related)} 条")
+
+        return related_inflow
+
+    def calculate_risk_metrics(self, total_inflow, related_inflow):
+        """
+        计算风险指标
+        对应SQL中的 risk_metrics
+
+        步骤：
+        1. 左连接：所有客户都有总流入，部分客户有"关联方流入"
+        2. 缺失值填充为0
+        3. 计算关联方占比 = 关联方流入 / 总流入
+        """
+        if len(total_inflow) == 0:
+            return pd.DataFrame()
+
+        # ---- 步骤1：左连接 ----
+        # 以 total_inflow 为左表，related_inflow 为右表
+        # how='left' 表示左连接，左表所有行都保留
+        # on=['party_id', 'loan_contract_id'] 按这两个字段匹配
+        risk_metrics = total_inflow.merge(
+            related_inflow[['party_id', 'loan_contract_id', 'related_party_operating_inflow']],
+            on=['party_id', 'loan_contract_id'],
+            how='left'
+        )
+
+        # ---- 步骤2：缺失值填充 ----
+        # 没有关联方交易的客户，关联方流入为0
+        risk_metrics['related_party_operating_inflow'] = risk_metrics['related_party_operating_inflow'].fillna(0)
+
+        # ---- 步骤3：计算关联方占比 ----
+        # np.where(条件, 真值, 假值) 是向量化的if-else
+        # 如果总流入 > 0，计算比值；否则为0（避免除以0）
+        risk_metrics['related_party_inflow_ratio'] = np.where(
+            risk_metrics['total_operating_inflow'] > 0,
+            risk_metrics['related_party_operating_inflow'] / risk_metrics['total_operating_inflow'],
+            0
+        )
+
+        return risk_metrics
+
+
+# ============================================================
+# 第5部分：风险检测类
+# ============================================================
+
+class RiskDetector:
+    """
+    风险检测器
+    根据关联方占比进行风险分级
+    """
+
+    def __init__(self, config):
+        """构造函数，接收配置对象"""
+        self.config = config
+
+    def detect(self, risk_metrics):
+        """
+        检测风险客户
+        对应SQL中的 final exception population
+
+        分级规则：
+        - 占比 ≥ 80% → High（高风险）
+        - 占比 ≥ 50% → Medium（中风险）
+        - 占比 ≥ 30% → Low（低风险）
+        - 占比 < 30% → Normal（正常）
+        """
+        if len(risk_metrics) == 0:
+            return pd.DataFrame()
+
+        # 只保留有经营收入的客户（总流入 > 0）
+        df = risk_metrics[risk_metrics['total_operating_inflow'] > 0].copy()
+
+        # ---- 风险分级函数 ----
+        def get_risk_level(ratio):
+            """根据占比返回风险等级"""
+            if ratio >= 0.80:
+                return 'High'
+            elif ratio >= 0.50:
+                return 'Medium'
+            elif ratio >= 0.30:
+                return 'Low'
+            else:
+                return 'Normal'
+
+        # 对每个客户的占比应用分级函数
+        # .apply() 对Series的每个元素应用函数
+        df['risk_flag'] = df['related_party_inflow_ratio'].apply(get_risk_level)
+
+        # ---- 添加风险描述 ----
+        risk_desc = {
+            'High': '关联方现金流高度集中(≥80%)，强烈建议核查',
+            'Medium': '关联方现金流中度集中(50%-80%)，建议核查',
+            'Low': '关联方现金流轻度集中(30%-50%)，建议关注',
+            'Normal': '关联方现金流占比正常(<30%)'
+        }
+        # .map() 用字典映射值
+        df['risk_description'] = df['risk_flag'].map(risk_desc)
+
+        # ---- 排序 ----
+        # 先按风险等级降序（High > Medium > Low > Normal）
+        # 再按占比降序（同等级内占比高的排前面）
+        # ascending=[False, False] 表示两列都是降序
+        return df.sort_values(['risk_flag', 'related_party_inflow_ratio'], ascending=[False, False])
+
+
+# ============================================================
+# 第6部分：可视化类
+# ============================================================
+
+class Visualizer:
+    """
+    可视化工具
+    生成3种图表：风险分布图、Top风险客户图、占比分布图
+    """
+
+    def __init__(self, config):
+        """构造函数，接收配置对象"""
+        self.config = config
+
+        # 图表输出目录
+        self.output_dir = config.OUTPUT_PATH / "charts"
+        self.output_dir.mkdir(exist_ok=True)
+
+        # ---- 设置中文字体 ----
+        # 默认字体不支持中文，需要手动设置
+        try:
+            # 按优先级尝试多个中文字体
+            plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'DejaVu Sans']
+            # 解决负号显示为方块的问题
+            plt.rcParams['axes.unicode_minus'] = False
+        except:
+            pass  # 如果字体设置失败，使用默认字体（中文会显示为方块）
+
+    def plot_all(self, df):
+        """
+        生成所有图表
+        """
+        if len(df) == 0:
+            return
+
+        self.plot_risk_distribution(df)   # 图表1：风险等级分布
+        self.plot_top_risky_customers(df) # 图表2：Top风险客户
+        self.plot_ratio_distribution(df)  # 图表3：占比分布
+
+        print(f"   📊 图表已保存至: {self.output_dir}")
+
+    def plot_risk_distribution(self, df):
+        """
+        风险等级分布图（柱状图 + 饼图）
+        用于快速了解整体风险状况
+        """
+        # ---- 创建子图 ----
+        # 1行2列，总大小12x5英寸
+        # fig 是画布对象，axes 是子图对象数组（2个）
+        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+        # ---- 统计各风险等级的数量 ----
+        # value_counts() 返回 Series，索引是等级，值是数量
+        risk_counts = df['risk_flag'].value_counts()
+
+        # ---- 定义颜色 ----
+        # 红色=高风险，橙色=中风险，黄色=低风险，绿色=正常
+        colors = {
+            'High': '#e74c3c',    # 红色
+            'Medium': '#f39c12',  # 橙色
+            'Low': '#f1c40f',     # 黄色
+            'Normal': '#2ecc71'   # 绿色
+        }
+        # 根据风险等级获取对应的颜色列表
+        bar_colors = [colors.get(x, '#95a5a6') for x in risk_counts.index]
+
+        # ---- 左图：柱状图 ----
+        axes[0].bar(risk_counts.index, risk_counts.values, color=bar_colors)
+        axes[0].set_title('风险等级分布', fontsize=14)  # 标题
+        axes[0].set_xlabel('风险等级')                  # X轴标签
+        axes[0].set_ylabel('客户数量')                  # Y轴标签
+
+        # 在柱子上方添加数值标签
+        # enumerate() 同时获取索引i和值v
+        for i, v in enumerate(risk_counts.values):
+            axes[0].text(i, v + 0.5, str(v), ha='center', va='bottom')
+
+        # ---- 右图：饼图 ----
+        # 只显示数量>0的等级
+        non_zero = risk_counts[risk_counts > 0]
+        if len(non_zero) > 0:
+            # explode 将某些扇区分离突出显示（高风险和中风险）
+            explode = [0.05 if x in ['High', 'Medium'] else 0 for x in non_zero.index]
+            axes[1].pie(
+                non_zero.values,                    # 数值
+                labels=non_zero.index,              # 标签
+                autopct='%1.1f%%',                  # 显示百分比，保留1位小数
+                colors=[colors.get(x, '#95a5a6') for x in non_zero.index],
+                explode=explode                     # 分离扇区
+            )
+        axes[1].set_title('风险等级占比', fontsize=14)
+
+        # ---- 保存 ----
+        plt.tight_layout()  # 自动调整布局，避免重叠
+        plt.savefig(self.output_dir / 'risk_distribution.png', dpi=150)
+        plt.close()  # 关闭图形，释放内存
+
+    def plot_top_risky_customers(self, df, top_n=10):
+        """
+        Top N 高风险客户（横向柱状图）
+        用于贷后团队重点排查
+        """
+        # 筛选高风险和中风险客户，取前top_n个
+        high_risk = df[df['risk_flag'].isin(['High', 'Medium'])].head(top_n)
+        if len(high_risk) == 0:
+            return
+
+        # ---- 创建图形 ----
+        fig, ax = plt.subplots(figsize=(12, 6))
+
+        # ---- 处理客户名称（过长则截断） ----
+        # 列表推导式：如果名称长度>12，截断并加...
+        short_names = [
+            str(n)[:12] + '...' if len(str(n)) > 12 else str(n)
+            for n in high_risk['party_name']
+        ]
+
+        # ---- 绘制横向柱状图 ----
+        # barh() = horizontal bar chart
+        bars = ax.barh(
+            short_names,                                    # Y轴：客户名称
+            high_risk['related_party_inflow_ratio'],        # X轴：关联方占比
+            color=['#e74c3c' if x == 'High' else '#f39c12' for x in high_risk['risk_flag']]
+        )
+        ax.set_xlabel('关联方现金流占比')
+        ax.set_title(f'Top {top_n} 风险客户', fontsize=14)
+        ax.invert_yaxis()  # 反转Y轴，让占比最高的在顶部
+
+        # ---- 在柱子上添加百分比标签 ----
+        for bar in bars:
+            width = bar.get_width()
+            ax.text(width + 0.01, bar.get_y() + bar.get_height()/2,
+                   f'{width:.1%}', va='center')
+
+        # ---- 添加阈值参考线 ----
+        ax.axvline(x=0.5, color='orange', linestyle='--', alpha=0.7, label='50%阈值')
+        ax.axvline(x=0.8, color='red', linestyle='--', alpha=0.7, label='80%阈值')
+        ax.legend()
+
+        # ---- 保存 ----
+        plt.tight_layout()
+        plt.savefig(self.output_dir / 'top_risky_customers.png', dpi=150)
+        plt.close()
+
+    def plot_ratio_distribution(self, df):
+        """
+        关联方占比分布直方图
+        用于判断阈值设置是否合理
+        """
+        # 只分析有风险的客户（排除Normal）
+        risky = df[df['risk_flag'].isin(['High', 'Medium', 'Low'])]
+        if len(risky) == 0:
+            return
+
+        # ---- 创建图形 ----
+        fig, ax = plt.subplots(figsize=(10, 5))
+
+        # ---- 绘制直方图 ----
+        # bins=20 将数据分成20个区间
+        ax.hist(
+            risky['related_party_inflow_ratio'],
+            bins=20,
+            alpha=0.7,          # 透明度0.7
+            color='steelblue',
+            edgecolor='black'   # 边框颜色
+        )
+
+        # ---- 添加阈值参考线 ----
+        ax.axvline(x=0.5, color='orange', linestyle='--', linewidth=2, label='50%阈值')
+        ax.axvline(x=0.8, color='red', linestyle='--', linewidth=2, label='80%阈值')
+
+        ax.set_xlabel('关联方现金流占比')
+        ax.set_ylabel('客户数量')
+        ax.set_title('风险客户关联方占比分布', fontsize=14)
+        ax.legend()
+
+        # ---- 保存 ----
+        plt.tight_layout()
+        plt.savefig(self.output_dir / 'ratio_distribution.png', dpi=150)
+        plt.close()
+
+
+# ============================================================
+# 第7部分：主程序
+# ============================================================
+
+def main():
+    """
+    主程序入口
+    执行完整的数据分析流程
+    """
+    # ---- 打印标题 ----
+    print("=" * 60)  # 打印60个等号作为分隔线
+    print("SME关联方现金流集中度检测系统 v1.0")
+    print("=" * 60)
+
+    # ---- 1. 初始化配置 ----
+    config = Config()
+    print(f"\n📋 配置:")
+    print(f"   - 回溯窗口: {config.LOOKBACK_DAYS} 天")
+    print(f"   - 关联方占比阈值: {config.RELATED_PARTY_RATIO_THRESHOLD * 100}%")
+
+    # ---- 2. 删除旧数据重新生成（确保数据一致性） ----
+    # shutil 是高级文件操作库
+    import shutil
+    if config.DATA_PATH.exists():
+        # rmtree = remove tree，递归删除整个目录
+        shutil.rmtree(config.DATA_PATH)
+    # 重新创建空目录
+    config.DATA_PATH.mkdir(exist_ok=True)
+
+    # ---- 3. 加载或生成数据 ----
+    loans, customers, transactions, relations = load_or_generate_data(config)
+
+    # ---- 4. 现金流分析 ----
+    print("\n🔍 分析现金流...")
+    analyzer = CashFlowAnalyzer(config)
+
+    total_inflow = analyzer.calculate_total_operating_inflow(loans, customers, transactions)
+    print(f"   - 有效经营客户: {len(total_inflow)} 个")
+
+    related_inflow = analyzer.calculate_related_party_inflow(relations)
+    print(f"   - 有关联方交易的客户: {len(related_inflow)} 个")
+
+    risk_metrics = analyzer.calculate_risk_metrics(total_inflow, related_inflow)
+    print(f"   - 有效分析样本: {len(risk_metrics)} 个")
+
+    # ---- 5. 风险检测 ----
+    print("\n🚨 风险检测...")
+    detector = RiskDetector(config)
+    risk_results = detector.detect(risk_metrics)
+
+    flagged = risk_results[risk_results['risk_flag'] != 'Normal']
+    print(f"   - 发现风险客户: {len(flagged)} 个")
+
+    # 如果有风险客户，打印详细分布
+    if len(flagged) > 0:
+        print("\n📊 风险分布:")
+        # value_counts() 统计各等级数量，.to_string() 转为字符串显示
+        print(risk_results['risk_flag'].value_counts().to_string())
+
+        # 打印高风险客户示例
+        high = risk_results[risk_results['risk_flag'] == 'High'].head(5)
+        if len(high) > 0:
+            print("\n📋 高风险客户示例:")
+            # iterrows() 遍历行
+            for _, row in high.iterrows():
+                print(f"   - {row['party_name']}: 关联方占比 {row['related_party_inflow_ratio']:.1%}")
+
+    # ---- 6. 导出CSV报告 ----
+    print("\n📄 生成报告...")
+    # encoding='utf-8-sig' 让Excel能正确显示中文（带BOM的UTF-8）
+    risk_results.to_csv(
+        config.OUTPUT_PATH / "risk_report.csv",
+        index=False,
+        encoding='utf-8-sig'
+    )
+    print(f"   ✅ 报告已保存")
+
+    # ---- 7. 生成可视化 ----
+    print("\n📈 生成可视化...")
+    viz = Visualizer(config)
+    viz.plot_all(risk_results)
+
+    # ---- 8. 输出最终摘要 ----
+    print("\n" + "=" * 60)
+    print("✅ 分析完成!")
+    print(f"   - 总样本: {len(risk_results)} 个客户")
+    print(f"   - 风险客户: {len(flagged)} 个")
+    print(f"   - 高风险: {len(risk_results[risk_results['risk_flag'] == 'High'])} 个")
+    print(f"   - 中风险: {len(risk_results[risk_results['risk_flag'] == 'Medium'])} 个")
+    print(f"   - 低风险: {len(risk_results[risk_results['risk_flag'] == 'Low'])} 个")
+    print("=" * 60)
+
+
+# ---- 程序入口 ----
+# 只有直接运行此文件时才执行main()
+# 如果被其他文件import导入，不会自动执行
+if __name__ == "__main__":
+    main()
